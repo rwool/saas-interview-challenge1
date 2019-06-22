@@ -14,11 +14,13 @@ import (
 	"github.com/pkg/errors"
 	"github.com/rwool/saas-interview-challenge1/pkg/endpoint"
 	"github.com/rwool/saas-interview-challenge1/pkg/http"
-	"github.com/rwool/saas-interview-challenge1/pkg/queuepubsub"
+	"github.com/rwool/saas-interview-challenge1/pkg/queuesubscribe"
 	"github.com/rwool/saas-interview-challenge1/pkg/service"
 	"github.com/rwool/saas-interview-challenge1/pkg/service/keyvalue"
 	"github.com/rwool/saas-interview-challenge1/pkg/service/queue"
 )
+
+const workerQueueName = "worker_document_parser"
 
 func getRedisClient() (*redis.Client, error) {
 	address, ok := os.LookupEnv("REDIS_ADDRESS")
@@ -69,12 +71,12 @@ func setup() {
 	kv := keyvalue.NewRedisAdapter(rc)
 
 	// Business logic.
-	apiService := service.NewAPIService(q, kv, queuepubsub.QueueName, l)
+	apiService := service.NewAPIService(q, kv, workerQueueName, l)
 	workerService := service.NewWorkerService(service.WorkerServiceConfig{
 		Queue:   q,
 		KeyVal:  kv,
 		Log:     l,
-		Channel: queuepubsub.QueueName,
+		Channel: workerQueueName,
 	})
 
 	// Endpoints.
@@ -83,7 +85,12 @@ func setup() {
 
 	// Transports.
 	httpHandler := http.NewAPIHTTPHandler(apiEndpoint, nil)
-	subscriber := queuepubsub.MakeQueuePubSubHandler(workerEndpoint, q, l)
+	subscriber := queuesubscribe.MakeWorkerHandler(queuesubscribe.Config{
+		Endpoint: workerEndpoint,
+		Queue:    q,
+		Log:      l,
+		Channel:  workerQueueName,
+	})
 
 	server, err := serveHTTP(httpHandler)
 	if err != nil {

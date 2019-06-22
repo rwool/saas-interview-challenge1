@@ -1,6 +1,8 @@
 // Package queuepubsub provides support for transport of publish/subscribe
-// messages to and from a message queue..
-package queuepubsub
+// messages to and from a message queue.
+//
+// This is analogous to the http package for the API service.
+package queuesubscribe
 
 import (
 	"bytes"
@@ -18,44 +20,65 @@ import (
 	"github.com/pkg/errors"
 )
 
-const QueueName = "worker_parse_document"
+// Config contains the configuration for setting up a
+// subscription to a channel for a worker.
+type Config struct {
+	Endpoint endpoint.Endpoint
+	Queue    queue.Queue
+	Log      log.Logger
+	Channel  string
+}
 
-func MakeQueuePubSubHandler(endpoint endpoint.Endpoint, queue queue.Queue, logger log.Logger) func(context.Context) {
-	dataC := make(chan []byte)
-	subLoop := makeSubscribeLoop(queue, logger, dataC, QueueName)
+// MakeWorkerHandler returns a function that creates a subscription
+// to a given channel.
+func MakeWorkerHandler(conf Config) func(context.Context) {
+	var (
+		dataC   = make(chan []byte)
+		subLoop = makeSubscribeLoop(conf.Queue, conf.Log, dataC, conf.Channel)
+	)
+
 	return func(ctx context.Context) {
 		go subLoop(ctx)
+
 		for {
 			select {
 			case data := <-dataC:
 				// Process incoming data asynchronously to not block other
 				// requests.
-				go func() {
-					pdr, err := decodeWorkerParseDocumentRequest(ctx, data)
-					if err != nil {
-						// TODO: Better way of handling errors here.
-						//  Possibly a dead letter queue or way of notifying the
-						//  creator of the request?
-						_ = logger.Log("LEVEL", "ERROR", "MESSAGE", err.Error())
-						return
-					}
-					_ = logger.Log("LEVEL", "DEBUG", "MESSAGE", fmt.Sprintf("Received document request %s", pdr.(service.DocumentID).ID))
-					// TODO: Create sibling trace span here.
-					dfrr, err := endpoint(ctx, pdr)
-					if err != nil {
-						_ = logger.Log("LEVEL", "ERROR", "MESSAGE", err.Error())
-						return
-					}
-					err = encodeWorkerParseDocumentResponse(ctx, queue, QueueName, logger, dfrr)
-					if err != nil {
-						_ = logger.Log("LEVEL", "ERROR", "MESSAGE", err.Error())
-						return
-					}
-				}()
+				go processDocumentRequest(ctx, data, conf)
 			case <-ctx.Done():
 				return
 			}
 		}
+	}
+}
+
+func processDocumentRequest(ctx context.Context, data []byte, conf Config) {
+	// Decode request.
+	pdr, err := decodeWorkerParseDocumentRequest(ctx, data)
+	if err != nil {
+		// TODO: Better way of handling errors here.
+		//  Possibly a dead letter queue or way of notifying the
+		//  creator of the request?
+		_ = conf.Log.Log("LEVEL", "ERROR", "MESSAGE", err.Error())
+		return
+	}
+	_ = conf.Log.Log("LEVEL", "DEBUG", "MESSAGE", fmt.Sprintf("Received document request %s", pdr.(service.DocumentID).ID))
+	// TODO: Create sibling trace span here.
+
+	// Perform business logic.
+	// TODO: Create sibling trace span here.
+	dfrr, err := conf.Endpoint(ctx, pdr)
+	if err != nil {
+		_ = conf.Log.Log("LEVEL", "ERROR", "MESSAGE", err.Error())
+		return
+	}
+
+	// Encode response.
+	err = encodeWorkerParseDocumentResponse(ctx, conf.Queue, conf.Channel, conf.Log, dfrr)
+	if err != nil {
+		_ = conf.Log.Log("LEVEL", "ERROR", "MESSAGE", err.Error())
+		return
 	}
 }
 
@@ -64,6 +87,7 @@ func MakeQueuePubSubHandler(endpoint endpoint.Endpoint, queue queue.Queue, logge
 func makeSubscribeLoop(q queue.Queue, l log.Logger, c chan []byte, channel string) func(context.Context) {
 	return func(ctx context.Context) {
 		_ = l.Log("LEVEL", "INFO", "MESSAGE", fmt.Sprintf("Beginning subscription for %s", channel))
+
 		for {
 			data, err := q.Pull(ctx, channel)
 			// Check if the Pull was stopped from a context cancellation or
